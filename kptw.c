@@ -8,7 +8,7 @@
 
 // Retrieve the DirectoryTableBase (CR3) for Windows 11
 ULONG64 GetProcessCR3(PEPROCESS Process) {
-    // Verify the offset; 0x0288 is typical but should be confirmed
+    // Verify offset 0x0288 is typical but should be confirmed
     ULONG64* DirBasePtr = (ULONG64*)((PUCHAR)Process + 0x0288);
     return *DirBasePtr;
 }
