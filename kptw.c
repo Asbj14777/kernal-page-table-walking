@@ -3,16 +3,17 @@
 #define PAGE_SHIFT 12
 #define PAGE_SIZE (1ULL << PAGE_SHIFT)
 #define PTE_PRESENT 0x1
-#define PTE_PS 0x80
+#define PTE_PS      0x80
 #define PTE_PFN_MASK 0xFFFFFFFFFF000ULL
 
-// Retrieve the DirectoryTableBase (CR3) for Windows 11
+// Retrieve the DirectoryTableBase (CR3) for a given process
 ULONG64 GetProcessCR3(PEPROCESS Process) {
-    // Verify offset 0x0288 is typical but should be confirmed
+    // Offset 0x288 is typical on Windows 11; confirm for your build
     ULONG64* DirBasePtr = (ULONG64*)((PUCHAR)Process + 0x0288);
     return *DirBasePtr;
 }
 
+// Map and unmap a physical page into virtual address space
 PVOID MapPhysicalPage(PHYSICAL_ADDRESS PhysAddr) {
     return MmMapIoSpace(PhysAddr, PAGE_SIZE, MmNonCached);
 }
@@ -23,7 +24,7 @@ void UnmapPhysicalPage(PVOID MappedAddr) {
     }
 }
 
-// Walk page tables to get physical address
+// Walk page tables to translate virtual address to physical address
 PHYSICAL_ADDRESS GetPhysicalAddress(PEPROCESS Process, PVOID VirtualAddress) {
     ULONG64 DirectoryTableBase = GetProcessCR3(Process);
     if (DirectoryTableBase == 0 || DirectoryTableBase == 0xFFFFFFFFFFFFFFFFULL) {
@@ -32,13 +33,14 @@ PHYSICAL_ADDRESS GetPhysicalAddress(PEPROCESS Process, PVOID VirtualAddress) {
 
     ULONG64 Va = (ULONG64)VirtualAddress;
     ULONG64 Indexes[4] = {
-        (Va >> 39) & 0x1FF,
-        (Va >> 30) & 0x1FF,
-        (Va >> 21) & 0x1FF,
-        (Va >> 12) & 0x1FF
+        (Va >> 39) & 0x1FF,  // PML4
+        (Va >> 30) & 0x1FF,  // PDPT
+        (Va >> 21) & 0x1FF,  // PD
+        (Va >> 12) & 0x1FF   // PT
     };
 
-    ULONG64 PhysAddrVal = DirectoryTableBase; // PML4
+    ULONG64 PhysAddrVal = DirectoryTableBase;
+
     for (int level = 0; level < 4; level++) {
         PHYSICAL_ADDRESS DirPhys = { .QuadPart = PhysAddrVal };
         PVOID MappedDir = MapPhysicalPage(DirPhys);
@@ -46,29 +48,34 @@ PHYSICAL_ADDRESS GetPhysicalAddress(PEPROCESS Process, PVOID VirtualAddress) {
 
         ULONG64* Entry = (ULONG64*)((PUCHAR)MappedDir + Indexes[level] * sizeof(ULONG64));
         ULONG64 EntryVal = *Entry;
+
         UnmapPhysicalPage(MappedDir);
 
         if ((EntryVal & PTE_PRESENT) == 0) {
-            return (PHYSICAL_ADDRESS){ .QuadPart = -1LL }; 
+            return (PHYSICAL_ADDRESS){ .QuadPart = -1LL };
         }
 
+        // Handle large pages
         if (level < 3 && (EntryVal & PTE_PS)) {
             ULONG64 LargePagePhysBase = EntryVal & PTE_PFN_MASK;
             ULONG64 Offset = Va & ((1ULL << (12 + 9 * (3 - level))) - 1);
-            ULONG64 PhysAddr = LargePagePhysBase + Offset;
-            PHYSICAL_ADDRESS PhysAddrResult = { .QuadPart = PhysAddr };
-            return PhysAddrResult;
+            return (PHYSICAL_ADDRESS){ .QuadPart = LargePagePhysBase + Offset };
         }
 
         PhysAddrVal = EntryVal & PTE_PFN_MASK;
     }
 
-    ULONG64 Offset = Va & (PAGE_SIZE - 1);
-    PHYSICAL_ADDRESS FinalPhys = { .QuadPart = PhysAddrVal + Offset };
-    return FinalPhys;
+    // Standard 4KB page
+    return (PHYSICAL_ADDRESS){ .QuadPart = PhysAddrVal + (Va & (PAGE_SIZE - 1)) };
 }
 
-NTSTATUS WriteMemoryViaPageTables(PEPROCESS TargetProcess, PVOID TargetAddress, PVOID SourceBuffer, SIZE_T BufferSize) {
+// Write memory to a target process using direct page table manipulation
+NTSTATUS WriteMemoryViaPageTables(
+    PEPROCESS TargetProcess,
+    PVOID TargetAddress,
+    PVOID SourceBuffer,
+    SIZE_T BufferSize
+) {
     PUCHAR Src = (PUCHAR)SourceBuffer;
     PUCHAR DstVa = (PUCHAR)TargetAddress;
     SIZE_T Remaining = BufferSize;
@@ -79,23 +86,18 @@ NTSTATUS WriteMemoryViaPageTables(PEPROCESS TargetProcess, PVOID TargetAddress, 
     while (Remaining > 0) {
         PHYSICAL_ADDRESS PhysAddr = GetPhysicalAddress(TargetProcess, DstVa);
         if (PhysAddr.QuadPart == (ULONGLONG)-1LL) {
-            if (MappedPage) {
-                UnmapPhysicalPage(MappedPage);
-            }
+            if (MappedPage) UnmapPhysicalPage(MappedPage);
             return STATUS_ACCESS_VIOLATION;
         }
 
         ULONG64 OffsetInPage = (ULONG64)DstVa & (PAGE_SIZE - 1);
         ULONG64 PagePhysBase = PhysAddr.QuadPart - OffsetInPage;
 
+        // Map a new physical page if needed
         if (!MappedPage || MappedPagePhysBase != PagePhysBase) {
-            if (MappedPage) {
-                UnmapPhysicalPage(MappedPage);
-            }
+            if (MappedPage) UnmapPhysicalPage(MappedPage);
             MappedPage = MapPhysicalPage((PHYSICAL_ADDRESS){ .QuadPart = PagePhysBase });
-            if (!MappedPage) {
-                return STATUS_INSUFFICIENT_RESOURCES;
-            }
+            if (!MappedPage) return STATUS_INSUFFICIENT_RESOURCES;
             MappedPagePhysBase = PagePhysBase;
         }
 
@@ -107,8 +109,6 @@ NTSTATUS WriteMemoryViaPageTables(PEPROCESS TargetProcess, PVOID TargetAddress, 
         Remaining -= ToCopy;
     }
 
-    if (MappedPage) {
-        UnmapPhysicalPage(MappedPage);
-    }
+    if (MappedPage) UnmapPhysicalPage(MappedPage);
     return STATUS_SUCCESS;
 }
