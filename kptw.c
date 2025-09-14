@@ -24,11 +24,10 @@ void UnmapPhysicalPage(PVOID MappedAddr) {
     }
 }
 
-// Walk page tables to translate virtual address to physical address
 PHYSICAL_ADDRESS GetPhysicalAddress(PEPROCESS Process, PVOID VirtualAddress) {
     ULONG64 DirectoryTableBase = GetProcessCR3(Process);
-    if (DirectoryTableBase == 0 || DirectoryTableBase == 0xFFFFFFFFFFFFFFFFULL) {
-        return (PHYSICAL_ADDRESS){ .QuadPart = -1LL };
+    if (!DirectoryTableBase || DirectoryTableBase == 0xFFFFFFFFFFFFFFFFULL) {
+        return (PHYSICAL_ADDRESS){ .QuadPart = -1 };
     }
 
     ULONG64 Va = (ULONG64)VirtualAddress;
@@ -44,28 +43,29 @@ PHYSICAL_ADDRESS GetPhysicalAddress(PEPROCESS Process, PVOID VirtualAddress) {
     for (int level = 0; level < 4; level++) {
         PHYSICAL_ADDRESS DirPhys = { .QuadPart = PhysAddrVal };
         PVOID MappedDir = MapPhysicalPage(DirPhys);
-        if (!MappedDir) return (PHYSICAL_ADDRESS){ .QuadPart = -1LL };
+        if (!MappedDir) return (PHYSICAL_ADDRESS){ .QuadPart = -1 };
 
         ULONG64* Entry = (ULONG64*)((PUCHAR)MappedDir + Indexes[level] * sizeof(ULONG64));
         ULONG64 EntryVal = *Entry;
-
         UnmapPhysicalPage(MappedDir);
 
         if ((EntryVal & PTE_PRESENT) == 0) {
-            return (PHYSICAL_ADDRESS){ .QuadPart = -1LL };
+            return (PHYSICAL_ADDRESS){ .QuadPart = -1 };
         }
 
-        // Handle large pages
-        if (level < 3 && (EntryVal & PTE_PS)) {
-            ULONG64 LargePagePhysBase = EntryVal & PTE_PFN_MASK;
-            ULONG64 Offset = Va & ((1ULL << (12 + 9 * (3 - level))) - 1);
-            return (PHYSICAL_ADDRESS){ .QuadPart = LargePagePhysBase + Offset };
+        // Handle large pages (1GB or 2MB)
+        if ((level == 1 || level == 2) && (EntryVal & PTE_PS)) {
+            ULONG64 pageSize = (level == 1) ? (1ULL << 30) : (1ULL << 21);
+            ULONG64 PhysBase = EntryVal & PTE_PFN_MASK;
+            ULONG64 Offset = Va & (pageSize - 1);
+            return (PHYSICAL_ADDRESS){ .QuadPart = PhysBase + Offset };
         }
 
+        // Move to next level
         PhysAddrVal = EntryVal & PTE_PFN_MASK;
     }
 
-    // Standard 4KB page
+    // 4KB page
     return (PHYSICAL_ADDRESS){ .QuadPart = PhysAddrVal + (Va & (PAGE_SIZE - 1)) };
 }
 
