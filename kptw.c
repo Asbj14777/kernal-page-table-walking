@@ -8,7 +8,7 @@
 
 // Retrieve the DirectoryTableBase (CR3) for a given process
 ULONG64 GetProcessCR3(PEPROCESS Process) {
-    // Offset 0x288 is typical on Windows 11; confirm for your build
+    // Offset 0x28 for DirectoryTableBase in EPROCESS (embedded KPROCESS) on Windows 10/11
     ULONG64* DirBasePtr = (ULONG64*)((PUCHAR)Process + 0x28);
     return *DirBasePtr;
 }
@@ -76,6 +76,10 @@ NTSTATUS WriteMemoryViaPageTables(
     PVOID SourceBuffer,
     SIZE_T BufferSize
 ) {
+    if (!TargetProcess || !TargetAddress || !SourceBuffer || BufferSize == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     PUCHAR Src = (PUCHAR)SourceBuffer;
     PUCHAR DstVa = (PUCHAR)TargetAddress;
     SIZE_T Remaining = BufferSize;
