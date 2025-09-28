@@ -202,45 +202,62 @@ NTSTATUS WriteMemoryViaPageTables(
     PEPROCESS TargetProcess,
     PVOID TargetAddress,
     PVOID SourceBuffer,
-    SIZE_T BufferSize
+    SIZE_T BufferSize,
+    BOOLEAN IsUserBuffer
 ) {
+    NTSTATUS status = STATUS_SUCCESS;
+    PMDL srcMdl = NULL;
+    PVOID kernelSourceBuffer = SourceBuffer; 
+
     if (!TargetProcess || !TargetAddress || !SourceBuffer || BufferSize == 0) {
         return STATUS_INVALID_PARAMETER;
     }
+    if (IsUserBuffer) {
+        if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+            return STATUS_INVALID_LEVEL;
+        }
+        status = MapUserBufferWithMdl(SourceBuffer, BufferSize, &srcMdl, &kernelSourceBuffer);
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("Failed to map user source buffer: 0x%08X\n", status));
+            return status;
+        }
+    }
 
-    PUCHAR Src = (PUCHAR)SourceBuffer;
+    PUCHAR Src = (PUCHAR)kernelSourceBuffer;
     PUCHAR DstVa = (PUCHAR)TargetAddress;
     SIZE_T Remaining = BufferSize;
-
     PVOID MappedPage = NULL;
     ULONG64 MappedPagePhysBase = 0;
-
     while (Remaining > 0) {
         PHYSICAL_ADDRESS PhysAddr = GetPhysicalAddress(TargetProcess, DstVa);
         if (PhysAddr.QuadPart == (ULONGLONG)-1LL) {
-            if (MappedPage) UnmapPhysicalPage(MappedPage);
-            return STATUS_ACCESS_VIOLATION;
+            status = STATUS_ACCESS_VIOLATION;
+            break;
         }
-
         ULONG64 OffsetInPage = (ULONG64)DstVa & (PAGE_SIZE - 1);
         ULONG64 PagePhysBase = PhysAddr.QuadPart - OffsetInPage;
-
-        // Map a new physical page if needed
+  
         if (!MappedPage || MappedPagePhysBase != PagePhysBase) {
             if (MappedPage) UnmapPhysicalPage(MappedPage);
             MappedPage = MapPhysicalPage((PHYSICAL_ADDRESS){ .QuadPart = PagePhysBase });
-            if (!MappedPage) return STATUS_INSUFFICIENT_RESOURCES;
+            if (!MappedPage) {
+                status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
             MappedPagePhysBase = PagePhysBase;
         }
-
         SIZE_T ToCopy = min(Remaining, (SIZE_T)(PAGE_SIZE - OffsetInPage));
         RtlCopyMemory((PUCHAR)MappedPage + OffsetInPage, Src, ToCopy);
-
         Src += ToCopy;
         DstVa += ToCopy;
         Remaining -= ToCopy;
     }
-
     if (MappedPage) UnmapPhysicalPage(MappedPage);
-    return STATUS_SUCCESS;
+
+    // Clean up user MDL if applicable
+    if (IsUserBuffer && srcMdl) {
+        UnmapAndFreeMdl(srcMdl);
+    }
+
+    return status;
 }
