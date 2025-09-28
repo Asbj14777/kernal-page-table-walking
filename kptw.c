@@ -13,6 +13,136 @@ ULONG64 GetProcessCR3(PEPROCESS Process) {
     return *DirBasePtr;
 }
 
+#include <ntddk.h>
+
+PEPROCESS
+FindProcessByName(
+    _In_opt_ const CHAR *ImageNameAscii
+)
+{
+    if (ImageNameAscii == NULL) {
+        return NULL;
+    }
+
+    PEPROCESS process = NULL;
+    PEPROCESS nextProcess = NULL;
+
+    for (nextProcess = PsGetNextProcess(NULL);
+         nextProcess != NULL;
+         nextProcess = PsGetNextProcess(nextProcess))
+    {
+        const CHAR *procName = PsGetProcessImageFileName(nextProcess);
+        if (procName != NULL) {
+            SIZE_T queryLen = strlen(ImageNameAscii);
+            SIZE_T procLen = strnlen(procName, 16);
+            if (queryLen == procLen) {
+                BOOLEAN isMatch = TRUE;
+                for (SIZE_T i = 0; i < queryLen; ++i) {
+                    CHAR queryChar = ImageNameAscii[i];
+                    CHAR procChar = procName[i];
+
+                    if (queryChar >= 'A' && queryChar <= 'Z') {
+                        queryChar += ('a' - 'A');
+                    }
+                    if (procChar >= 'A' && procChar <= 'Z') {
+                        procChar += ('a' - 'A');
+                    }
+
+                    if (queryChar != procChar) {
+                        isMatch = FALSE;
+                        break;
+                    }
+                }
+
+                if (isMatch) {
+                    ObReferenceObject(nextProcess);
+                    process = nextProcess;
+                    break;
+                }
+            }
+        }
+
+        ObDereferenceObject(nextProcess);
+    }
+
+    return process;
+}
+
+NTSTATUS
+MapUserBufferWithMdl(
+    _In_ PVOID UserVa,
+    _In_ SIZE_T Length,
+    _Out_ PMDL *OutMdl,
+    _Out_ PVOID *OutKernelVa
+)
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    PMDL mdl = NULL;
+    PVOID kernelVa = NULL;
+
+    if (!UserVa || (Length == 0) || !OutMdl || !OutKernelVa) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        return STATUS_INVALID_LEVEL;
+    }
+
+    mdl = IoAllocateMdl(UserVa, (ULONG)Length, FALSE, FALSE, NULL);
+    if (mdl == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    __try {
+        MmProbeAndLockPages(mdl, UserMode, IoModifyAccess);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+        goto Cleanup;
+    }
+
+    kernelVa = MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
+    if (kernelVa == NULL) {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    *OutMdl = mdl;
+    *OutKernelVa = kernelVa;
+    return STATUS_SUCCESS;
+
+Cleanup:
+    if (mdl != NULL) {
+        __try {
+            MmUnlockPages(mdl);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+        IoFreeMdl(mdl);
+    }
+    *OutMdl = NULL;
+    *OutKernelVa = NULL;
+    return status;
+}
+
+VOID
+UnmapAndFreeMdl(
+    _In_opt_ PMDL Mdl
+)
+{
+    if (Mdl == NULL) {
+        return;
+    }
+
+    __try {
+        MmUnlockPages(Mdl);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+
+    IoFreeMdl(Mdl);
+}
+
 // Map and unmap a physical page into virtual address space
 PVOID MapPhysicalPage(PHYSICAL_ADDRESS PhysAddr) {
     return MmMapIoSpace(PhysAddr, PAGE_SIZE, MmNonCached);
