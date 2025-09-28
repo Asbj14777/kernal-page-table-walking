@@ -13,8 +13,6 @@ ULONG64 GetProcessCR3(PEPROCESS Process) {
     return *DirBasePtr;
 }
 
-#include <ntddk.h>
-
 PEPROCESS
 FindProcessByName(
     _In_opt_ const CHAR *ImageNameAscii
