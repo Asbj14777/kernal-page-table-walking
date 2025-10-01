@@ -183,7 +183,7 @@ static VOID UnmapAndFreeMdl(PMDL Mdl) {
 
 typedef enum _MEMORY_ACCESS_TYPE { MemRead, MemWrite } MEMORY_ACCESS_TYPE;
 
-NTSTATUS AccessMemoryViaPageTablesMDLOptimized(
+NTSTATUS AccessMemoryViaPageTablesSafe(
     PEPROCESS TargetProcess,
     PVOID TargetAddress,
     PVOID Buffer,
@@ -205,60 +205,66 @@ NTSTATUS AccessMemoryViaPageTablesMDLOptimized(
         PHYSICAL_ADDRESS phys = GetPhysicalAddressStrict(TargetProcess, va, &walkStatus);
         if (!NT_SUCCESS(walkStatus)) { status = walkStatus; break; }
 
+     
+        SIZE_T pageOffset = (UINT64)va & (PAGE_SIZE - 1);
+        SIZE_T runLength = PAGE_SIZE - pageOffset;
 
-        SIZE_T runLength = PAGE_SIZE - ((UINT64)va & (PAGE_SIZE - 1));
-        UINT64 runPhys = phys.QuadPart - ((UINT64)va & (PAGE_SIZE - 1));
+     
+        if (runLength > remaining)
+            runLength = remaining;
 
-        while (runLength < remaining) {
-            NTSTATUS nextStatus;
-            PHYSICAL_ADDRESS nextPhys = GetPhysicalAddressStrict(TargetProcess, va + runLength, &nextStatus);
-            if (!NT_SUCCESS(nextStatus) || nextPhys.QuadPart != runPhys + runLength) break;
-            runLength += PAGE_SIZE;
-        }
-
-        
+ 
         PMDL mdl = IoAllocateMdl(va, (ULONG)runLength, FALSE, FALSE, NULL);
         if (!mdl) { status = STATUS_INSUFFICIENT_RESOURCES; break; }
 
         __try {
-            MmProbeAndLockPages(mdl, KernelMode, (AccessType == MemWrite) ? IoWriteAccess : IoReadAccess);
+       
+            MmProbeAndLockPages(mdl, KernelMode,
+                (AccessType == MemWrite) ? IoWriteAccess : IoReadAccess);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             IoFreeMdl(mdl);
             status = GetExceptionCode();
             break;
         }
 
-       
         PVOID mapped = MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
-        if (!mapped) { status = STATUS_INSUFFICIENT_RESOURCES; MmUnlockPages(mdl); IoFreeMdl(mdl); break; }
+        if (!mapped) {
+            MmUnlockPages(mdl);
+            IoFreeMdl(mdl);
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
 
-   
         __try {
-            if (AccessType == MemWrite)
-                RtlCopyMemory(mapped + ((UINT64)va & (PAGE_SIZE - 1)), buf, runLength - ((UINT64)va & (PAGE_SIZE - 1)));
-            else
-                RtlCopyMemory(buf, mapped + ((UINT64)va & (PAGE_SIZE - 1)), runLength - ((UINT64)va & (PAGE_SIZE - 1)));
-            KeMemoryBarrier();
-        } __except (EXCEPTION_EXECUTE_HANDLER) { status = GetExceptionCode(); }
+            if (AccessType == MemWrite) {
+                RtlCopyMemory(mapped, buf, runLength);
+            } else {
+                RtlCopyMemory(buf, mapped, runLength);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            status = GetExceptionCode();
+        }
 
         MmUnlockPages(mdl);
         IoFreeMdl(mdl);
 
         if (!NT_SUCCESS(status)) break;
 
-        buf += runLength - ((UINT64)va & (PAGE_SIZE - 1));
-        va += runLength - ((UINT64)va & (PAGE_SIZE - 1));
-        remaining -= runLength - ((UINT64)va & (PAGE_SIZE - 1));
+        buf += runLength;
+        va += runLength;
+        remaining -= runLength;
     }
 
     return status;
 }
 
+
 #define ReadMemoryViaPageTables(TargetProcess, TargetAddress, Buffer, BufferSize) \
-    AccessMemoryViaPageTablesMDLOptimized(TargetProcess, TargetAddress, Buffer, BufferSize, MemRead)
+    AccessMemoryViaPageTablesSafe(TargetProcess, TargetAddress, Buffer, BufferSize, MemRead)
 
 #define WriteMemoryViaPageTables(TargetProcess, TargetAddress, Buffer, BufferSize) \
-    AccessMemoryViaPageTablesMDLOptimized(TargetProcess, TargetAddress, Buffer, BufferSize, MemWrite)
+    AccessMemoryViaPageTablesSafe(TargetProcess, TargetAddress, Buffer, BufferSize, MemWrite)
+
 
 
 
