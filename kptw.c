@@ -21,6 +21,9 @@ typedef struct _CR3_CACHE_ENTRY {
 static CR3_CACHE_ENTRY g_Cr3Cache[CR3_CACHE_MAX];
 static FAST_MUTEX g_Cr3CacheLock;
 
+typedef enum _MEMORY_ACCESS_TYPE { MemRead, 
+MemWrite } MEMORY_ACCESS_TYPE;
+
 static VOID InitCr3Cache(void) {
     ExInitializeFastMutex(&g_Cr3CacheLock);
     RtlZeroMemory(g_Cr3Cache, sizeof(g_Cr3Cache));
@@ -180,8 +183,6 @@ static VOID UnmapAndFreeMdl(PMDL Mdl) {
     __try { MmUnlockPages(Mdl); } __except(EXCEPTION_EXECUTE_HANDLER) {}
     IoFreeMdl(Mdl);
 }
-
-typedef enum _MEMORY_ACCESS_TYPE { MemRead, MemWrite } MEMORY_ACCESS_TYPE;
 
 NTSTATUS AccessMemoryViaPageTablesSafe(
     PEPROCESS TargetProcess,
