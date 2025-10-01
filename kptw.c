@@ -254,15 +254,11 @@ NTSTATUS AccessMemoryViaPageTablesMDLOptimized(
     return status;
 }
 
-#define ReadMemoryViaPageTablesMDL(TargetProcess, TargetAddress, Buffer, BufferSize) \
+#define ReadMemoryViaPageTables(TargetProcess, TargetAddress, Buffer, BufferSize) \
     AccessMemoryViaPageTablesMDLOptimized(TargetProcess, TargetAddress, Buffer, BufferSize, MemRead)
 
-#define WriteMemoryViaPageTablesMDL(TargetProcess, TargetAddress, Buffer, BufferSize) \
+#define WriteMemoryViaPageTables(TargetProcess, TargetAddress, Buffer, BufferSize) \
     AccessMemoryViaPageTablesMDLOptimized(TargetProcess, TargetAddress, Buffer, BufferSize, MemWrite)
 
 
-#define ReadMemoryViaPageTables(TargetProcess, TargetAddress, Buffer, BufferSize, BufferIsUser) \
-    AccessMemoryViaPageTables(TargetProcess, TargetAddress, Buffer, BufferSize, BufferIsUser, MemRead)
 
-#define WriteMemoryViaPageTables(TargetProcess, TargetAddress, Buffer, BufferSize, BufferIsUser) \
-    AccessMemoryViaPageTables(TargetProcess, TargetAddress, Buffer, BufferSize, BufferIsUser, MemWrite)
