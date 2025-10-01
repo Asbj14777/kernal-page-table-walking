@@ -183,55 +183,83 @@ static VOID UnmapAndFreeMdl(PMDL Mdl) {
 
 typedef enum _MEMORY_ACCESS_TYPE { MemRead, MemWrite } MEMORY_ACCESS_TYPE;
 
-NTSTATUS AccessMemoryViaPageTables(
+NTSTATUS AccessMemoryViaPageTablesMDLOptimized(
     PEPROCESS TargetProcess,
     PVOID TargetAddress,
     PVOID Buffer,
     SIZE_T BufferSize,
-    BOOLEAN BufferIsUser,
     MEMORY_ACCESS_TYPE AccessType
 ) {
-    if (!TargetProcess || !TargetAddress || !Buffer || BufferSize==0) return STATUS_INVALID_PARAMETER;
-    if (KeGetCurrentIrql() != PASSIVE_LEVEL) return STATUS_INVALID_LEVEL;
+    if (!TargetProcess || !TargetAddress || !Buffer || BufferSize == 0)
+        return STATUS_INVALID_PARAMETER;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return STATUS_INVALID_LEVEL;
+
     NTSTATUS status = STATUS_SUCCESS;
-    PMDL mdl = NULL;
-    PVOID kernelBuf = Buffer;
-    if (BufferIsUser) {
-        status = MapUserBufferWithMdl(Buffer, BufferSize, &mdl, &kernelBuf);
-        if (!NT_SUCCESS(status)) return status;
-    }
-    PUCHAR buf = (PUCHAR)kernelBuf;
     PUCHAR va = (PUCHAR)TargetAddress;
+    PUCHAR buf = (PUCHAR)Buffer;
     SIZE_T remaining = BufferSize;
+
     while (remaining > 0) {
         NTSTATUS walkStatus = STATUS_UNSUCCESSFUL;
         PHYSICAL_ADDRESS phys = GetPhysicalAddressStrict(TargetProcess, va, &walkStatus);
         if (!NT_SUCCESS(walkStatus)) { status = walkStatus; break; }
-        ULONG64 offset = (UINT64)va & (PAGE_SIZE-1);
-        ULONG64 pagePhys = phys.QuadPart - offset;
-        SIZE_T pageSpan = PAGE_SIZE;
-        while (pageSpan < remaining) {
+
+
+        SIZE_T runLength = PAGE_SIZE - ((UINT64)va & (PAGE_SIZE - 1));
+        UINT64 runPhys = phys.QuadPart - ((UINT64)va & (PAGE_SIZE - 1));
+
+        while (runLength < remaining) {
             NTSTATUS nextStatus;
-            PHYSICAL_ADDRESS nextPhys = GetPhysicalAddressStrict(TargetProcess, va+pageSpan, &nextStatus);
-            if (!NT_SUCCESS(nextStatus) || nextPhys.QuadPart != pagePhys + pageSpan) break;
-            pageSpan += PAGE_SIZE;
+            PHYSICAL_ADDRESS nextPhys = GetPhysicalAddressStrict(TargetProcess, va + runLength, &nextStatus);
+            if (!NT_SUCCESS(nextStatus) || nextPhys.QuadPart != runPhys + runLength) break;
+            runLength += PAGE_SIZE;
         }
-        PVOID mapped = MapPhys(pagePhys);
-        if (!mapped) { status = STATUS_INSUFFICIENT_RESOURCES; break; }
-        SIZE_T toCopy = min(remaining, pageSpan - offset);
+
+        
+        PMDL mdl = IoAllocateMdl(va, (ULONG)runLength, FALSE, FALSE, NULL);
+        if (!mdl) { status = STATUS_INSUFFICIENT_RESOURCES; break; }
+
+        __try {
+            MmProbeAndLockPages(mdl, KernelMode, (AccessType == MemWrite) ? IoWriteAccess : IoReadAccess);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            IoFreeMdl(mdl);
+            status = GetExceptionCode();
+            break;
+        }
+
+       
+        PVOID mapped = MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
+        if (!mapped) { status = STATUS_INSUFFICIENT_RESOURCES; MmUnlockPages(mdl); IoFreeMdl(mdl); break; }
+
+   
         __try {
             if (AccessType == MemWrite)
-                RtlCopyMemory((PUCHAR)mapped + offset, buf, toCopy);
+                RtlCopyMemory(mapped + ((UINT64)va & (PAGE_SIZE - 1)), buf, runLength - ((UINT64)va & (PAGE_SIZE - 1)));
             else
-                RtlCopyMemory(buf, (PUCHAR)mapped + offset, toCopy);
+                RtlCopyMemory(buf, mapped + ((UINT64)va & (PAGE_SIZE - 1)), runLength - ((UINT64)va & (PAGE_SIZE - 1)));
             KeMemoryBarrier();
-        } __except(EXCEPTION_EXECUTE_HANDLER) { status = GetExceptionCode(); UnmapPhys(mapped); break; }
-        buf += toCopy; va += toCopy; remaining -= toCopy;
-        UnmapPhys(mapped);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { status = GetExceptionCode(); }
+
+        MmUnlockPages(mdl);
+        IoFreeMdl(mdl);
+
+        if (!NT_SUCCESS(status)) break;
+
+        buf += runLength - ((UINT64)va & (PAGE_SIZE - 1));
+        va += runLength - ((UINT64)va & (PAGE_SIZE - 1));
+        remaining -= runLength - ((UINT64)va & (PAGE_SIZE - 1));
     }
-    if (BufferIsUser && mdl) UnmapAndFreeMdl(mdl);
+
     return status;
 }
+
+#define ReadMemoryViaPageTablesMDL(TargetProcess, TargetAddress, Buffer, BufferSize) \
+    AccessMemoryViaPageTablesMDLOptimized(TargetProcess, TargetAddress, Buffer, BufferSize, MemRead)
+
+#define WriteMemoryViaPageTablesMDL(TargetProcess, TargetAddress, Buffer, BufferSize) \
+    AccessMemoryViaPageTablesMDLOptimized(TargetProcess, TargetAddress, Buffer, BufferSize, MemWrite)
+
 
 #define ReadMemoryViaPageTables(TargetProcess, TargetAddress, Buffer, BufferSize, BufferIsUser) \
     AccessMemoryViaPageTables(TargetProcess, TargetAddress, Buffer, BufferSize, BufferIsUser, MemRead)
